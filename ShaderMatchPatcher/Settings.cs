@@ -8,14 +8,15 @@ public class Settings
     [SynthesisOrder]
     [SynthesisSettingName("Target mod")]
     [SynthesisTooltip("The one plugin whose weapon meshes get patched (e.g. LSB_BattleHammersV6.esp). " +
-                      "Only weapons this plugin defines are touched. Leave empty and the patcher does nothing.")]
+                      "Only weapons this plugin defines are touched, and their loose mesh files are edited in " +
+                      "place (originals are backed up first). Leave empty and the patcher does nothing.")]
     public ModKey TargetMod = ModKey.Null;
 
     [SynthesisOrder]
-    [SynthesisSettingName("Output folder")]
-    [SynthesisTooltip("Where patched meshes are written, e.g. a new MO2 mod folder " +
-                      "(...\\mods\\Shader Match Output). Empty = the Data folder, which under MO2 is the overwrite folder.")]
-    public string OutputFolder = "";
+    [SynthesisSettingName("Restore originals")]
+    [SynthesisTooltip("Instead of patching, put back the original of every mesh this patcher changed in the " +
+                      "target mod, from its backup. Turn it off again afterwards.")]
+    public bool RestoreOriginals = false;
 
     [SynthesisOrder]
     [SynthesisSettingName("Infer from other shapes")]

@@ -23,18 +23,21 @@ weapon meshes onto one mod's weapon meshes, where they use the same textures.
 - Inferred results never change the shader type or fill texture slots.
 - Geometry-dependent flag bits (Skinned, Vertex_Alpha, Vertex_Colors, Double_Sided), UVs,
   alpha and the diffuse/normal slots are kept from the target.
-- Keeps a cache of each mesh's original, so later runs work from the original rather than
-  the patcher's own output, and restores it when a mesh no longer needs changes.
+- **Edits the target mod's loose mesh files in place.** Under MO2 the change lands in the
+  mod's own folder (the existing file is opened and rewritten, so nothing goes to overwrite).
+  Meshes packed in a BSA are skipped and reported.
+- Backs up each mesh's original before its first edit. Later runs work from that original
+  rather than the patcher's own edit, skip files already up to date, and put the original
+  back when a mesh no longer needs changes. **Restore originals** puts every backup back.
 - Writes a CSV report of every decision to the patcher's settings folder.
 
 ## Use
 
 1. In Synthesis: add a patcher → **Local Solution** → **Existing**, pick
    `ShaderMatchPatcher.sln` / `ShaderMatchPatcher`.
-2. Set **Target mod**, and **Output folder** to a dedicated MO2 mod folder
-   (empty = the Data folder, i.e. MO2's overwrite).
+2. Set **Target mod**.
 3. Run Synthesis from MO2 so loose mod files are visible.
-4. Enable the output mod below the target mod.
+4. To undo: tick **Restore originals**, run once, then untick it.
 
 ## Development
 

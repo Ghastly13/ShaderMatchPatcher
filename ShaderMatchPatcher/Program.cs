@@ -130,9 +130,17 @@ public static class Program
               ?? new Dictionary<string, ManifestEntry>()
             : new Dictionary<string, ManifestEntry>();
         manifest = new Dictionary<string, ManifestEntry>(manifest, StringComparer.OrdinalIgnoreCase);
+        var dataFolder = state.DataFolderPath.Path;
+
+        if (settings.RestoreOriginals)
+        {
+            RestoreAll(state, manifest, dataFolder);
+            SaveManifest(cacheDir, manifestPath, manifest);
+            return;
+        }
 
         // ---- target shapes
-        var nifs = new Dictionary<string, (NifFile nif, byte[] original, bool fromCache)>(StringComparer.OrdinalIgnoreCase);
+        var nifs = new Dictionary<string, (NifFile nif, byte[] original, bool fromCache, string winnerSha)>(StringComparer.OrdinalIgnoreCase);
         var targets = new List<TargetShape>();
         var rows = new List<string[]>();
         foreach (var (mesh, ctx) in targetMeshes.OrderBy(k => k.Key))
@@ -141,6 +149,13 @@ public static class Program
             if (winner == null)
             {
                 rows.Add([mesh, "", "", "SKIPPED", "mesh not found in the load order", "", ""]);
+                continue;
+            }
+            if (!File.Exists(Path.Combine(dataFolder, mesh)))
+            {
+                rows.Add([mesh, "", "", "SKIPPED",
+                    "packed in an archive (BSA), not a loose file, so it can't be edited in place: extract it to patch it",
+                    "", ""]);
                 continue;
             }
             var original = winner;
@@ -157,7 +172,7 @@ public static class Program
             try
             {
                 var nif = new NifFile(original);
-                nifs[mesh] = (nif, original, fromCache);
+                nifs[mesh] = (nif, original, fromCache, Sha(winner));
                 foreach (var e in nif.Shaders())
                     targets.Add(new TargetShape
                     {
@@ -173,10 +188,9 @@ public static class Program
 
         Matcher.Run(targets, reference, settings);
 
-        // ---- apply and write
-        var outRoot = settings.OutputFolder.Trim().Length > 0 ? settings.OutputFolder.Trim() : state.DataFolderPath.Path;
-        int updatedShapes = 0, writtenMeshes = 0, restored = 0;
-        foreach (var (mesh, (nif, original, fromCache)) in nifs)
+        // ---- apply and write back in place
+        int updatedShapes = 0, writtenMeshes = 0, restored = 0, upToDate = 0;
+        foreach (var (mesh, (nif, original, fromCache, winnerSha)) in nifs)
         {
             var any = false;
             foreach (var t in targets.Where(t => t.Mesh == mesh))
@@ -221,45 +235,100 @@ public static class Program
                 }
                 var change = $"{before} -> {shader.Describe()} ({string.Join(", ", changes)})";
                 rows.Add([mesh, t.Shape, t.Diffuse, "UPDATED", t.Method, t.SourceLabel, change]);
-                Console.WriteLine($"UPDATED {mesh} [{t.Shape}]\n    {t.Method}: {t.SourceLabel}\n    {change}");
-                updatedShapes++;
+                if (!fromCache) Console.WriteLine($"UPDATED {mesh} [{t.Shape}]\n    {t.Method}: {t.SourceLabel}\n    {change}");
                 any = true;
             }
 
-            var dest = Path.Combine(outRoot, mesh);
+            var dest = Path.Combine(dataFolder, mesh);
             if (any)
             {
                 var bytes = nif.ToBytes();
                 Verify(bytes, nif);
-                Directory.CreateDirectory(Path.GetDirectoryName(dest)!);
-                File.WriteAllBytes(dest, bytes);
+                if (Sha(bytes) == winnerSha)
+                {
+                    upToDate++;  // already edited this way on an earlier run
+                    continue;
+                }
+                updatedShapes += rows.Count(r => r[0] == mesh && r[3] == "UPDATED");
+                // back up the original before the first edit, then record what we wrote
                 Directory.CreateDirectory(cacheDir);
                 var cacheFile = Path.Combine(cacheDir, Sanitize(mesh));
                 if (!fromCache || !File.Exists(cacheFile)) File.WriteAllBytes(cacheFile, original);
                 manifest[mesh] = new ManifestEntry { WrittenSha = Sha(bytes), CacheFile = cacheFile };
+                SaveManifest(cacheDir, manifestPath, manifest);
+                WriteInPlace(dest, bytes);
                 writtenMeshes++;
             }
             else if (fromCache)
             {
-                // our earlier output is loading but nothing should change now: put the original back
-                Directory.CreateDirectory(Path.GetDirectoryName(dest)!);
-                File.WriteAllBytes(dest, original);
+                // our earlier edit is in the file but nothing should change now: put the original back
+                WriteInPlace(dest, original);
                 manifest.Remove(mesh);
                 restored++;
             }
         }
 
-        Directory.CreateDirectory(cacheDir);
-        File.WriteAllText(manifestPath, JsonSerializer.Serialize(manifest, new JsonSerializerOptions { WriteIndented = true }));
+        SaveManifest(cacheDir, manifestPath, manifest);
         var reportPath = Path.Combine(dataDir, $"ShaderMatchReport - {Sanitize(target.FileName.String)}.csv");
         WriteCsv(reportPath, rows);
 
         Console.WriteLine();
         foreach (var r in rows.Where(r => r[3] is "ambiguous" or "no match" or "SKIPPED"))
             Console.WriteLine($"NOT CHANGED {r[0]} [{r[1]}]: {r[4]}");
-        Console.WriteLine($"\nShaderMatch: updated {updatedShapes} shader(s) in {writtenMeshes} mesh(es) under {outRoot}" +
+        Console.WriteLine($"\nShaderMatch: edited {updatedShapes} shader(s) in {writtenMeshes} mesh(es) of {target} in place" +
+                          (upToDate > 0 ? $"; {upToDate} mesh(es) already up to date from an earlier run" : "") +
                           (restored > 0 ? $"; restored {restored} mesh(es) to their originals" : "") + ".");
+        Console.WriteLine($"ShaderMatch: originals backed up in {cacheDir}");
         Console.WriteLine($"ShaderMatch: report written to {reportPath}");
+    }
+
+    /// <summary>
+    /// Overwrites an existing file's contents. Opening the existing file (rather than creating a new
+    /// one) is what makes MO2's virtual file system write into the mod that owns the file instead of
+    /// the overwrite folder.
+    /// </summary>
+    private static void WriteInPlace(string path, byte[] bytes)
+    {
+        using var fs = new FileStream(path, FileMode.Open, FileAccess.ReadWrite, FileShare.Read);
+        fs.SetLength(0);
+        fs.Write(bytes);
+        fs.Flush(true);
+    }
+
+    private static void RestoreAll(IPatcherState<ISkyrimMod, ISkyrimModGetter> state,
+        Dictionary<string, ManifestEntry> manifest, string dataFolder)
+    {
+        int restored = 0, changed = 0, missing = 0;
+        foreach (var (mesh, entry) in manifest.ToList())
+        {
+            var dest = Path.Combine(dataFolder, mesh);
+            if (!File.Exists(dest) || !File.Exists(entry.CacheFile))
+            {
+                missing++;
+                Console.WriteLine($"RESTORE skipped {mesh}: the mesh or its backup is gone");
+                continue;
+            }
+            if (Sha(File.ReadAllBytes(dest)) != entry.WrittenSha)
+            {
+                changed++;
+                Console.WriteLine($"RESTORE skipped {mesh}: changed since this patcher edited it, left as it is");
+                manifest.Remove(mesh);
+                continue;
+            }
+            WriteInPlace(dest, File.ReadAllBytes(entry.CacheFile));
+            manifest.Remove(mesh);
+            restored++;
+        }
+        Console.WriteLine($"ShaderMatch: restored {restored} mesh(es) to their originals" +
+                          (changed > 0 ? $", {changed} had changed since and were left alone" : "") +
+                          (missing > 0 ? $", {missing} could not be restored" : "") +
+                          ". Turn 'Restore originals' off before the next run.");
+    }
+
+    private static void SaveManifest(string cacheDir, string manifestPath, Dictionary<string, ManifestEntry> manifest)
+    {
+        Directory.CreateDirectory(cacheDir);
+        File.WriteAllText(manifestPath, JsonSerializer.Serialize(manifest, new JsonSerializerOptions { WriteIndented = true }));
     }
 
     /// <summary>Developer check: every .nif under the given folders must read and write back byte-for-byte.</summary>
