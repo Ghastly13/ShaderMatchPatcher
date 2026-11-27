@@ -13,11 +13,13 @@ public class Settings
     public ModKey TargetMod = ModKey.Null;
 
     [SynthesisOrder]
-    [SynthesisSettingName("Output folder")]
+    [SynthesisSettingName("Output location")]
     [SynthesisTooltip("Leave empty to edit the target mod's meshes in place. Otherwise the patched meshes are " +
-                      "written to this folder instead (as <folder>\\meshes\\...) and the target mod is left " +
-                      "untouched. Use a full path, e.g. an empty MO2 mod folder, and enable that mod below the " +
-                      "target mod. Meshes packed in a BSA can be patched this way too.")]
+                      "written to a new folder here named '<original mod> Fixed Meshes' (as ...\\meshes\\...) " +
+                      "and the target mod is left untouched. Use your MO2 mods folder: the original mod's name " +
+                      "is then taken from the mod folder holding the target plugin (otherwise the plugin's " +
+                      "name), and the new folder shows up as a mod to enable below the original. Meshes packed " +
+                      "in a BSA can be patched this way too.")]
     public string OutputFolder = "";
 
     [SynthesisOrder]

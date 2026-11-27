@@ -151,8 +151,10 @@ public static class Program
         var outSetting = settings.OutputFolder.Trim().Trim('"');
         if (outSetting.Length > 0)
         {
-            outputDir = Path.GetFullPath(Path.IsPathRooted(outSetting) ? outSetting : Path.Combine(dataFolder, outSetting));
-            if (SamePath(outputDir, dataFolder)) outputDir = null;
+            var location = Path.GetFullPath(Path.IsPathRooted(outSetting) ? outSetting : Path.Combine(dataFolder, outSetting));
+            outputDir = SamePath(location, dataFolder)
+                ? null
+                : Path.Combine(location, OriginalModName(location, target) + " Fixed Meshes");
         }
         var inPlace = outputDir == null;
         string Dest(string mesh) => Path.Combine(outputDir ?? dataFolder, mesh);
@@ -485,6 +487,28 @@ public static class Program
         var list = new List<string> { stem + suffix + ".dds" };
         if (stem.EndsWith("_d", StringComparison.OrdinalIgnoreCase)) list.Add(stem[..^2] + suffix + ".dds");
         return list;
+    }
+
+    /// <summary>
+    /// The name of the mod the target plugin comes from: when the output location is an MO2 mods
+    /// folder, the mod folder holding the plugin; otherwise the plugin's name without its extension.
+    /// </summary>
+    private static string OriginalModName(string location, ModKey target)
+    {
+        var plugin = target.FileName.String;
+        try
+        {
+            if (Directory.Exists(location))
+            {
+                var owner = Directory.EnumerateDirectories(location)
+                    .Where(d => !Path.GetFileName(d).EndsWith(" Fixed Meshes", StringComparison.OrdinalIgnoreCase))
+                    .FirstOrDefault(d => File.Exists(Path.Combine(d, plugin)));
+                if (owner != null) return Path.GetFileName(owner);
+            }
+        }
+        catch (IOException) { }
+        catch (UnauthorizedAccessException) { }
+        return Sanitize(target.Name);
     }
 
     private static bool SamePath(string a, string b) =>

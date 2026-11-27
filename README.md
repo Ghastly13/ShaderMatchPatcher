@@ -30,9 +30,11 @@ weapon meshes onto one mod's weapon meshes, where they use the same textures.
 - **By default edits the target mod's loose mesh files in place.** Under MO2 the change lands
   in the mod's own folder (the existing file is opened and rewritten, so nothing goes to
   overwrite). Meshes packed in a BSA are skipped and reported.
-- **Output folder**: set it and patched meshes are written there instead
-  (`<folder>\meshes\...`), leaving the target mod untouched; BSA-packed meshes can be patched
-  this way too. Point it at an empty MO2 mod folder and enable that mod below the target.
+- **Output location**: set it (normally to your MO2 `mods` folder) and patched meshes are
+  written to a new folder there named `<original mod> Fixed Meshes`, leaving the target mod
+  untouched; BSA-packed meshes can be patched this way too. The original mod's name is the MO2
+  mod folder that holds the target plugin, or the plugin's name if none is found. Enable the
+  new mod in MO2 below the original.
   Switching between in place and an output folder undoes the earlier edits first.
 - Backs up each mesh's original before its first edit. Later runs work from that original
   rather than the patcher's own edit, skip files already up to date, and undo an edit when
