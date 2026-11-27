@@ -23,12 +23,21 @@ weapon meshes onto one mod's weapon meshes, where they use the same textures.
 - Inferred results never change the shader type or fill texture slots.
 - Geometry-dependent flag bits (Skinned, Vertex_Alpha, Vertex_Colors, Double_Sided), UVs,
   alpha and the diffuse/normal slots are kept from the target.
-- **Edits the target mod's loose mesh files in place.** Under MO2 the change lands in the
-  mod's own folder (the existing file is opened and rewritten, so nothing goes to overwrite).
-  Meshes packed in a BSA are skipped and reported.
+- **Add matching _n / _m textures**: when a shape's normal map or environment mask slot is
+  empty and a texture named after its diffuse exists (`sword.dds` → `sword_n.dds`,
+  `sword_m.dds`; a `_d` diffuse also tries without the `_d`), it goes in that slot. This
+  happens for every shape, matched or not, before vanilla slots are filled.
+- **By default edits the target mod's loose mesh files in place.** Under MO2 the change lands
+  in the mod's own folder (the existing file is opened and rewritten, so nothing goes to
+  overwrite). Meshes packed in a BSA are skipped and reported.
+- **Output folder**: set it and patched meshes are written there instead
+  (`<folder>\meshes\...`), leaving the target mod untouched; BSA-packed meshes can be patched
+  this way too. Point it at an empty MO2 mod folder and enable that mod below the target.
+  Switching between in place and an output folder undoes the earlier edits first.
 - Backs up each mesh's original before its first edit. Later runs work from that original
-  rather than the patcher's own edit, skip files already up to date, and put the original
-  back when a mesh no longer needs changes. **Restore originals** puts every backup back.
+  rather than the patcher's own edit, skip files already up to date, and undo an edit when
+  a mesh no longer needs changes. **Restore originals** undoes everything: in-place edits get
+  their backup back, meshes in the output folder are deleted.
 - Writes a CSV report of every decision to the patcher's settings folder.
 
 ## Use

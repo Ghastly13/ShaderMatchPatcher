@@ -30,7 +30,14 @@ public static class Program
     {
         public string WrittenSha { get; set; } = "";
         public string CacheFile { get; set; } = "";
+        /// <summary>True: the target mod's own file was edited. False: a copy was written to Destination.</summary>
+        public bool InPlace { get; set; } = true;
+        public string Destination { get; set; } = "";
     }
+
+    /// <summary>Texture slots filled from files named after the diffuse: (slot, suffix, label).</summary>
+    private static readonly (int slot, string suffix, string label)[] OwnTextures =
+        [(1, "_n", "normal map"), (5, "_m", "environment mask")];
 
     public static void RunPatch(IPatcherState<ISkyrimMod, ISkyrimModGetter> state)
     {
@@ -134,9 +141,51 @@ public static class Program
 
         if (settings.RestoreOriginals)
         {
-            RestoreAll(state, manifest, dataFolder);
+            RestoreAll(manifest, dataFolder);
             SaveManifest(cacheDir, manifestPath, manifest);
             return;
+        }
+
+        // ---- where patched meshes go: in place, or a separate folder
+        string? outputDir = null;
+        var outSetting = settings.OutputFolder.Trim().Trim('"');
+        if (outSetting.Length > 0)
+        {
+            outputDir = Path.GetFullPath(Path.IsPathRooted(outSetting) ? outSetting : Path.Combine(dataFolder, outSetting));
+            if (SamePath(outputDir, dataFolder)) outputDir = null;
+        }
+        var inPlace = outputDir == null;
+        string Dest(string mesh) => Path.Combine(outputDir ?? dataFolder, mesh);
+        Console.WriteLine(inPlace
+            ? "ShaderMatch: editing the target mod's meshes in place."
+            : $"ShaderMatch: writing patched meshes to {outputDir}");
+
+        // undo earlier edits made to a different destination than the one now chosen
+        var switched = 0;
+        foreach (var (mesh, entry) in manifest.ToList())
+        {
+            if (entry.InPlace == inPlace && (inPlace || (entry.Destination.Length > 0 && SamePath(entry.Destination, Dest(mesh))))) continue;
+            var result = Undo(mesh, entry, dataFolder);
+            if (result != "restored") Console.WriteLine($"ShaderMatch: could not undo the earlier edit of {mesh}: {result}");
+            manifest.Remove(mesh);
+            switched++;
+        }
+        if (switched > 0)
+        {
+            SaveManifest(cacheDir, manifestPath, manifest);
+            Console.WriteLine($"ShaderMatch: output destination changed, undid {switched} earlier edit(s).");
+        }
+
+        var assetExists = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
+        bool AssetExists(string path)
+        {
+            if (!assetExists.TryGetValue(path, out var e))
+            {
+                e = state.AssetProvider.TryGetStream(new DataRelativePath(path), out var s);
+                s?.Dispose();
+                assetExists[path] = e;
+            }
+            return e;
         }
 
         // ---- target shapes
@@ -151,10 +200,11 @@ public static class Program
                 rows.Add([mesh, "", "", "SKIPPED", "mesh not found in the load order", "", ""]);
                 continue;
             }
-            if (!File.Exists(Path.Combine(dataFolder, mesh)))
+            if (inPlace && !File.Exists(Path.Combine(dataFolder, mesh)))
             {
                 rows.Add([mesh, "", "", "SKIPPED",
-                    "packed in an archive (BSA), not a loose file, so it can't be edited in place: extract it to patch it",
+                    "packed in an archive (BSA), not a loose file, so it can't be edited in place: extract it, " +
+                    "or set an output folder to patch it",
                     "", ""]);
                 continue;
             }
@@ -167,7 +217,10 @@ public static class Program
                     original = File.ReadAllBytes(entry.CacheFile);
                     fromCache = true;
                 }
-                else manifest.Remove(mesh); // the mesh changed since we wrote it: treat the new one as original
+                // in place, the mesh changed since we wrote it: treat the new one as original.
+                // In an output folder the winner is simply the original (that folder isn't winning), and
+                // the entry stays so the file written there can still be updated or removed.
+                else if (inPlace) manifest.Remove(mesh);
             }
             try
             {
@@ -195,76 +248,116 @@ public static class Program
             var any = false;
             foreach (var t in targets.Where(t => t.Mesh == mesh))
             {
-                if (!t.Resolved)
-                {
-                    rows.Add([mesh, t.Shape, t.Diffuse, t.Ambiguous != null ? "ambiguous" : t.Skipped ? "skipped" : "no match",
-                        t.Note, "", ""]);
-                    continue;
-                }
                 var shader = t.Original.Clone();
                 var before = shader.Describe();
-                var changes = shader.CopyMaterialFrom(t.Source!);
-                var slotChanges = new List<int>();
-                string[]? newSlots = null;
-                if (t.SourceSlots != null)
+                var changes = t.Resolved ? shader.CopyMaterialFrom(t.Source!) : [];
+                var newSlots = t.Slots.ToArray();
+                var slotChanged = false;
+                bool Empty(int i) => i >= newSlots.Length || newSlots[i].Trim().Length == 0;
+                void SetSlot(int i, string value)
                 {
-                    newSlots = [.. t.Slots];
-                    if (newSlots.Length < t.SourceSlots.Length)
-                        newSlots = [.. newSlots, .. Enumerable.Repeat("", t.SourceSlots.Length - newSlots.Length)];
-                    for (var i = 2; i < t.SourceSlots.Length; i++)
-                        if (newSlots[i].Trim().Length == 0 && t.SourceSlots[i].Trim().Length > 0)
-                        {
-                            newSlots[i] = t.SourceSlots[i];
-                            slotChanges.Add(i);
-                        }
-                    if (slotChanges.Count > 0) changes.Add("texture slots " + string.Join(",", slotChanges));
+                    if (newSlots.Length <= i) newSlots = [.. newSlots, .. Enumerable.Repeat("", i + 1 - newSlots.Length)];
+                    newSlots[i] = value;
+                    slotChanged = true;
                 }
+
+                // the mod's own _n / _m textures named after the diffuse, when their slot is empty
+                if (settings.AddMatchingTextures && t.Diffuse.Length > 0 &&
+                    !Matcher.SkipTexturePrefixes.Any(p => t.Diffuse.StartsWith(p)))
+                {
+                    var added = new List<string>();
+                    foreach (var (slot, suffix, label) in OwnTextures)
+                    {
+                        if (!Empty(slot)) continue;
+                        var found = SiblingTextures(t.Slots[0], suffix)
+                            .FirstOrDefault(c => AssetExists(TextureSet.Normalize(c)));
+                        if (found == null) continue;
+                        SetSlot(slot, found);
+                        added.Add($"{label} {Path.GetFileName(found)}");
+                    }
+                    if (added.Count > 0) changes.Add("added " + string.Join(", ", added));
+                }
+
+                // empty slots filled from the matched vanilla texture set
+                if (t.Resolved && t.SourceSlots != null)
+                {
+                    var filled = new List<int>();
+                    for (var i = 2; i < t.SourceSlots.Length; i++)
+                        if (Empty(i) && t.SourceSlots[i].Trim().Length > 0)
+                        {
+                            SetSlot(i, t.SourceSlots[i]);
+                            filled.Add(i);
+                        }
+                    if (filled.Count > 0) changes.Add("texture slots " + string.Join(",", filled));
+                }
+
                 if (changes.Count == 0)
                 {
-                    rows.Add([mesh, t.Shape, t.Diffuse, "already matches", t.Method, t.SourceLabel, ""]);
+                    rows.Add(t.Resolved
+                        ? [mesh, t.Shape, t.Diffuse, "already matches", t.Method, t.SourceLabel, ""]
+                        : [mesh, t.Shape, t.Diffuse, t.Ambiguous != null ? "ambiguous" : t.Skipped ? "skipped" : "no match",
+                            t.Note, "", ""]);
                     continue;
                 }
-                var block = shader.ToBytes();
-                _ = new LightingShader(block); // re-parse check
-                nif.Blocks[t.Block] = block;
-                if (slotChanges.Count > 0)
+                if (t.Resolved)
                 {
-                    var ts = TextureSet.Build(newSlots!);
-                    if (!TextureSet.Parse(ts).SequenceEqual(newSlots!)) throw new NifException("texture set rebuild failed");
+                    var block = shader.ToBytes();
+                    _ = new LightingShader(block); // re-parse check
+                    nif.Blocks[t.Block] = block;
+                }
+                if (slotChanged)
+                {
+                    var ts = TextureSet.Build(newSlots);
+                    if (!TextureSet.Parse(ts).SequenceEqual(newSlots)) throw new NifException("texture set rebuild failed");
                     nif.Blocks[t.Original.TextureSet] = ts;
                 }
+                var method = t.Resolved ? t.Method : "matching textures only, shader settings unchanged: " + t.Note;
                 var change = $"{before} -> {shader.Describe()} ({string.Join(", ", changes)})";
-                rows.Add([mesh, t.Shape, t.Diffuse, "UPDATED", t.Method, t.SourceLabel, change]);
-                if (!fromCache) Console.WriteLine($"UPDATED {mesh} [{t.Shape}]\n    {t.Method}: {t.SourceLabel}\n    {change}");
+                rows.Add([mesh, t.Shape, t.Diffuse, "UPDATED", method, t.SourceLabel, change]);
+                if (!fromCache) Console.WriteLine($"UPDATED {mesh} [{t.Shape}]\n    {method}: {t.SourceLabel}\n    {change}");
                 any = true;
             }
 
-            var dest = Path.Combine(dataFolder, mesh);
+            var dest = Dest(mesh);
             if (any)
             {
                 var bytes = nif.ToBytes();
                 Verify(bytes, nif);
-                if (Sha(bytes) == winnerSha)
+                var sha = Sha(bytes);
+                var current = inPlace ? winnerSha : File.Exists(dest) ? Sha(File.ReadAllBytes(dest)) : "";
+                if (inPlace && sha == current)
                 {
                     upToDate++;  // already edited this way on an earlier run
                     continue;
                 }
-                updatedShapes += rows.Count(r => r[0] == mesh && r[3] == "UPDATED");
                 // back up the original before the first edit, then record what we wrote
                 Directory.CreateDirectory(cacheDir);
                 var cacheFile = Path.Combine(cacheDir, Sanitize(mesh));
                 if (!fromCache || !File.Exists(cacheFile)) File.WriteAllBytes(cacheFile, original);
-                manifest[mesh] = new ManifestEntry { WrittenSha = Sha(bytes), CacheFile = cacheFile };
+                manifest[mesh] = new ManifestEntry
+                {
+                    WrittenSha = sha, CacheFile = cacheFile, InPlace = inPlace, Destination = inPlace ? "" : dest,
+                };
                 SaveManifest(cacheDir, manifestPath, manifest);
-                WriteInPlace(dest, bytes);
+                if (sha == current)
+                {
+                    upToDate++;
+                    continue;
+                }
+                updatedShapes += rows.Count(r => r[0] == mesh && r[3] == "UPDATED");
+                if (inPlace) WriteInPlace(dest, bytes);
+                else
+                {
+                    Directory.CreateDirectory(Path.GetDirectoryName(dest)!);
+                    File.WriteAllBytes(dest, bytes);
+                }
                 writtenMeshes++;
             }
-            else if (fromCache)
+            else if (manifest.TryGetValue(mesh, out var old))
             {
-                // our earlier edit is in the file but nothing should change now: put the original back
-                WriteInPlace(dest, original);
+                // an earlier edit exists but nothing should change now: undo it
+                if (Undo(mesh, old, dataFolder) == "restored") restored++;
                 manifest.Remove(mesh);
-                restored++;
             }
         }
 
@@ -275,9 +368,10 @@ public static class Program
         Console.WriteLine();
         foreach (var r in rows.Where(r => r[3] is "ambiguous" or "no match" or "SKIPPED"))
             Console.WriteLine($"NOT CHANGED {r[0]} [{r[1]}]: {r[4]}");
-        Console.WriteLine($"\nShaderMatch: edited {updatedShapes} shader(s) in {writtenMeshes} mesh(es) of {target} in place" +
+        Console.WriteLine($"\nShaderMatch: edited {updatedShapes} shader(s) in {writtenMeshes} mesh(es) of {target} " +
+                          (inPlace ? "in place" : $"into {outputDir}") +
                           (upToDate > 0 ? $"; {upToDate} mesh(es) already up to date from an earlier run" : "") +
-                          (restored > 0 ? $"; restored {restored} mesh(es) to their originals" : "") + ".");
+                          (restored > 0 ? $"; undid {restored} earlier edit(s) no longer needed" : "") + ".");
         Console.WriteLine($"ShaderMatch: originals backed up in {cacheDir}");
         Console.WriteLine($"ShaderMatch: report written to {reportPath}");
     }
@@ -295,29 +389,45 @@ public static class Program
         fs.Flush(true);
     }
 
-    private static void RestoreAll(IPatcherState<ISkyrimMod, ISkyrimModGetter> state,
-        Dictionary<string, ManifestEntry> manifest, string dataFolder)
+    /// <summary>
+    /// Undoes one earlier edit: an in-place edit gets its original back from the backup, a mesh written
+    /// to an output folder is deleted. Files changed by something else since are left alone.
+    /// Returns "restored", "changed" or "missing".
+    /// </summary>
+    private static string Undo(string mesh, ManifestEntry entry, string dataFolder)
+    {
+        var dest = entry.InPlace ? Path.Combine(dataFolder, mesh) : entry.Destination;
+        if (!File.Exists(dest)) return entry.InPlace ? "missing" : "restored";
+        if (Sha(File.ReadAllBytes(dest)) != entry.WrittenSha) return "changed";
+        if (entry.InPlace)
+        {
+            if (!File.Exists(entry.CacheFile)) return "missing";
+            WriteInPlace(dest, File.ReadAllBytes(entry.CacheFile));
+        }
+        else File.Delete(dest);
+        return "restored";
+    }
+
+    private static void RestoreAll(Dictionary<string, ManifestEntry> manifest, string dataFolder)
     {
         int restored = 0, changed = 0, missing = 0;
         foreach (var (mesh, entry) in manifest.ToList())
         {
-            var dest = Path.Combine(dataFolder, mesh);
-            if (!File.Exists(dest) || !File.Exists(entry.CacheFile))
+            switch (Undo(mesh, entry, dataFolder))
             {
-                missing++;
-                Console.WriteLine($"RESTORE skipped {mesh}: the mesh or its backup is gone");
-                continue;
+                case "missing":
+                    missing++;
+                    Console.WriteLine($"RESTORE skipped {mesh}: the mesh or its backup is gone");
+                    continue;
+                case "changed":
+                    changed++;
+                    Console.WriteLine($"RESTORE skipped {mesh}: changed since this patcher wrote it, left as it is");
+                    break;
+                default:
+                    restored++;
+                    break;
             }
-            if (Sha(File.ReadAllBytes(dest)) != entry.WrittenSha)
-            {
-                changed++;
-                Console.WriteLine($"RESTORE skipped {mesh}: changed since this patcher edited it, left as it is");
-                manifest.Remove(mesh);
-                continue;
-            }
-            WriteInPlace(dest, File.ReadAllBytes(entry.CacheFile));
             manifest.Remove(mesh);
-            restored++;
         }
         Console.WriteLine($"ShaderMatch: restored {restored} mesh(es) to their originals" +
                           (changed > 0 ? $", {changed} had changed since and were left alone" : "") +
@@ -362,6 +472,24 @@ public static class Program
         Console.WriteLine($"selftest: {ok} ok, {bad} failed, {shaders} shaders");
         return bad == 0 ? 0 : 1;
     }
+
+    /// <summary>
+    /// Texture paths named after a diffuse with the given suffix, written the way the diffuse is:
+    /// "textures\w\sword.dds" -> "textures\w\sword_n.dds"; a "_d" diffuse also tries without it.
+    /// </summary>
+    private static List<string> SiblingTextures(string diffuse, string suffix)
+    {
+        var raw = diffuse.Trim();
+        if (!raw.EndsWith(".dds", StringComparison.OrdinalIgnoreCase)) return [];
+        var stem = raw[..^4];
+        var list = new List<string> { stem + suffix + ".dds" };
+        if (stem.EndsWith("_d", StringComparison.OrdinalIgnoreCase)) list.Add(stem[..^2] + suffix + ".dds");
+        return list;
+    }
+
+    private static bool SamePath(string a, string b) =>
+        string.Equals(Path.GetFullPath(a).TrimEnd('\\', '/'), Path.GetFullPath(b).TrimEnd('\\', '/'),
+            StringComparison.OrdinalIgnoreCase);
 
     private static string MeshPath(string given)
     {

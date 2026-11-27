@@ -13,9 +13,18 @@ public class Settings
     public ModKey TargetMod = ModKey.Null;
 
     [SynthesisOrder]
+    [SynthesisSettingName("Output folder")]
+    [SynthesisTooltip("Leave empty to edit the target mod's meshes in place. Otherwise the patched meshes are " +
+                      "written to this folder instead (as <folder>\\meshes\\...) and the target mod is left " +
+                      "untouched. Use a full path, e.g. an empty MO2 mod folder, and enable that mod below the " +
+                      "target mod. Meshes packed in a BSA can be patched this way too.")]
+    public string OutputFolder = "";
+
+    [SynthesisOrder]
     [SynthesisSettingName("Restore originals")]
-    [SynthesisTooltip("Instead of patching, put back the original of every mesh this patcher changed in the " +
-                      "target mod, from its backup. Turn it off again afterwards.")]
+    [SynthesisTooltip("Instead of patching, undo every mesh this patcher changed for the target mod: edits made " +
+                      "in place are put back from their backup, meshes written to an output folder are deleted. " +
+                      "Turn it off again afterwards.")]
     public bool RestoreOriginals = false;
 
     [SynthesisOrder]
@@ -42,6 +51,13 @@ public class Settings
     [SynthesisTooltip("When a shape matches vanilla by texture, fill its empty texture slots (cubemap, " +
                       "environment mask, glow) from the vanilla texture set. Never done for inferred matches.")]
     public bool FillEmptyTextureSlots = true;
+
+    [SynthesisOrder]
+    [SynthesisSettingName("Add matching _n / _m textures")]
+    [SynthesisTooltip("When a shape's normal map or environment mask slot is empty and a texture named after " +
+                      "its diffuse exists in the load order (sword.dds -> sword_n.dds / sword_m.dds), put it " +
+                      "in that slot. Done for every shape, matched or not, and before vanilla slots are filled.")]
+    public bool AddMatchingTextures = true;
 
     [SynthesisOrder]
     [SynthesisSettingName("Include Creation Club weapons as reference")]
